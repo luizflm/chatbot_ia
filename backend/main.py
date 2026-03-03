@@ -1,0 +1,89 @@
+import os
+from fastapi import FastAPI, Form, UploadFile, HTTPException
+from pydantic import BaseModel
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_core.vectorstores import InMemoryVectorStore
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain.agents.middleware import dynamic_prompt, ModelRequest
+from langchain.agents import create_agent
+from langchain.messages import SystemMessage, HumanMessage
+from tempfile import NamedTemporaryFile
+import shutil
+from dotenv import load_dotenv
+
+load_dotenv('./.env')
+
+app = FastAPI()
+
+
+class ChatResponse(BaseModel):
+    answer: str
+
+
+model = ChatOpenAI(model="gpt-4.1")
+
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+
+vector_store = InMemoryVectorStore(embeddings)
+
+text_splitter = RecursiveCharacterTextSplitter(
+    chunk_size=1000,
+    chunk_overlap=200,
+    add_start_index=True,
+)
+
+
+@dynamic_prompt
+def prompt_with_context(request: ModelRequest) -> str:
+    """Inject context into state messages."""
+    last_query = request.state["messages"][-1].text
+    retrieved_docs = vector_store.similarity_search(last_query)
+
+    docs_content = "\n\n".join(doc.page_content for doc in retrieved_docs)
+
+    system_message = (
+        "You are a helpful assistant. Use the following context in your response:"
+        f"\n\n{docs_content}"
+    )
+
+    return system_message
+
+
+@app.post("/query", response_model=ChatResponse)
+async def query(
+    message: str = Form(),
+    file: UploadFile | None = None
+):
+    if file:
+        if file.content_type != "application/pdf":
+            raise HTTPException(400, "Only PDF files are supported.")
+
+        with NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            shutil.copyfileobj(file.file, tmp)
+            tmp_path = tmp.name
+
+        try:
+            loader = PyPDFLoader(tmp_path)
+            docs = loader.load()
+            chunks = text_splitter.split_documents(docs)
+
+            vector_store.add_documents(chunks)
+        finally:
+            os.remove(tmp_path)
+
+        agent = create_agent(model, tools=[], middleware=[prompt_with_context])
+        result = agent.invoke({
+            "messages": [
+                HumanMessage(content=message)
+            ]
+        })
+
+        response = result["messages"][-1]
+    else:
+        response = model.invoke([
+            SystemMessage("You are a helpful assistant."),
+            HumanMessage(content=message)
+        ])
+
+    return ChatResponse(answer=response.content)
