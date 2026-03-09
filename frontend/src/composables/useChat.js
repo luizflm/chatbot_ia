@@ -1,6 +1,6 @@
 import { ref, readonly } from 'vue';
 
-const API_URL = 'http://localhost:8000/query';
+const API_URL = '/api/query';
 
 export function useChat() {
     const messages = ref([]);
