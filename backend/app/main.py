@@ -1,19 +1,16 @@
 import os
+import shutil
 from fastapi import FastAPI, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_core.vectorstores import InMemoryVectorStore
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.agents.middleware import dynamic_prompt, ModelRequest
 from langchain.agents import create_agent
 from langchain.messages import SystemMessage, HumanMessage
+from langchain_postgres import PGVector
 from tempfile import NamedTemporaryFile
-import shutil
-from dotenv import load_dotenv
-
-load_dotenv('./.env')
 
 app = FastAPI()
 
@@ -30,10 +27,20 @@ class ChatResponse(BaseModel):
 
 
 model = ChatOpenAI(model="gpt-4.1")
-
 embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
 
-vector_store = InMemoryVectorStore(embeddings)
+CONNECTION_STRING = (
+    f"postgresql+psycopg://"
+    f"{os.getenv('POSTGRES_USER')}:{os.getenv('POSTGRES_PASSWORD')}"
+    f"@{os.getenv('POSTGRES_HOST', 'postgres')}:{os.getenv('POSTGRES_PORT', '5432')}"
+    f"/{os.getenv('POSTGRES_DB')}"
+)
+
+vector_store = PGVector(
+    embeddings=embeddings,
+    collection_name="docs",
+    connection=CONNECTION_STRING,
+)
 
 text_splitter = RecursiveCharacterTextSplitter(
     chunk_size=1000,
@@ -44,18 +51,19 @@ text_splitter = RecursiveCharacterTextSplitter(
 
 @dynamic_prompt
 def prompt_with_context(request: ModelRequest) -> str:
-    """Inject context into state messages."""
     last_query = request.state["messages"][-1].text
+
     retrieved_docs = vector_store.similarity_search(last_query)
 
     docs_content = "\n\n".join(doc.page_content for doc in retrieved_docs)
 
-    system_message = (
+    return (
         "You are a helpful assistant. Use the following context in your response:"
         f"\n\n{docs_content}"
     )
 
-    return system_message
+
+agent = create_agent(model, tools=[], middleware=[prompt_with_context])
 
 
 @app.post("/query", response_model=ChatResponse)
@@ -80,7 +88,6 @@ async def query(
         finally:
             os.remove(tmp_path)
 
-        agent = create_agent(model, tools=[], middleware=[prompt_with_context])
         result = agent.invoke({
             "messages": [
                 HumanMessage(content=message)

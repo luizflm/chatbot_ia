@@ -6,6 +6,8 @@ services:
       - "8000:8000"
     env_file:
       - ./backend/.env
+    depends_on:
+      - postgres
     restart: always
 
   frontend:
@@ -16,3 +18,17 @@ services:
     depends_on:
       - backend
     restart: always
+
+  postgres:
+    image: pgvector/pgvector:pg18-trixie
+    container_name: postgres_container
+    env_file:
+      - ./backend/.env
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    restart: always
+
+volumes:
+  postgres_data:
